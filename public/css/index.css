@@ -1,0 +1,12 @@
+.masterContainer {
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+  flex-direction: column;
+}
+
+.label {
+  margin: 0 10px;
+}

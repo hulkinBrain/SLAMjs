@@ -1,0 +1,17 @@
+{
+  "name": "orb",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node public/js/test.js",
+    "start": "node server.js 1234"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.17.1",
+    "gpu.js": "^2.10.6",
+    "ngrok": "^3.3.0"
+  }
+}

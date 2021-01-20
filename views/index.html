@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPU js</title>
+  <link href="/css/bulma.css" rel="stylesheet">
+  <link href="/css/index.css" rel="stylesheet">
+  <script src="/js/gpu-browser.min.js"></script>
+  <script src="/js/utils.js"></script>
+</head>
+<body>
+  <div class="masterContainer">
+    <canvas id="image" width=0 height=0 style="display: none"></canvas>
+    <video id="video"></video>
+    <div class="imageContainer" style="display: flex; align-items: center"></div>
+
+    <div class="interactionContainer">
+      <div class="inputContainer" style="display: flex; width: 80%; margin: 0 auto; flex-wrap: wrap; flex-grow: 1; justify-content: center">
+        <label class="label" for="strideInput">Stride:
+          <input class="input" id="strideInput" type="number" value="3">
+        </label>
+        <label class="label" for="blurInput">blur:
+          <input class="input" id="blurInput" type="number" value="1">
+        </label>
+        <label class="label" for="showFASTPointsInput">Show FAST Points:
+          <input id="showFASTPointsInput" type="checkbox">
+        </label>
+        <label class="label" for="showORBPointsInput">Show ORB Points:
+          <input id="showORBPointsInput" type="checkbox">
+        </label>
+      </div>
+
+      <div class="buttonContainer" style="display: flex; justify-content: center">
+        <div class="file" style="display: none">
+          <label class="file-label">
+            <input id="imageInput" class="file-input" type="file" name="imageInput" accept="image/png, image/jpeg">
+            <span class="file-cta">
+              <span class="file-label">
+                Choose a file…
+              </span>
+            </span>
+          </label>
+        </div>
+        <div class="field">
+          <div class="control">
+            <div class="select is-primary">
+              <select id="videoSourceSelect">
+                <option disabled>Select dropdown</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <button class="button is-success" id="streamToggleButton" onclick="toggleStream()">Start Stream</button>
+      </div>
+    </div>
+
+    <div class="coord" style="position: fixed; top: 0">Pos</div>
+
+  </div>
+  <script>
+    const gpu = new GPU();
+    let imageContainer = document.querySelector(".imageContainer");
+    let imageInput = document.querySelector("#imageInput");
+    let videoSourceSelect = document.querySelector("#videoSourceSelect");
+    let strideInput = document.querySelector("#strideInput");
+    let blurInput = document.querySelector("#blurInput");
+    let showFASTPointsInput = document.querySelector("#showFASTPointsInput");
+    let showORBPointsInput = document.querySelector("#showORBPointsInput");
+
+    let canvasImage = document.querySelector("#image");
+    let canvasImageBuffer = document.createElement("canvas");
+    let canvasImageBufferCtx = canvasImageBuffer.getContext("2d");
+    let streamToggleButton = document.querySelector("#streamToggleButton");
+    let video = document.querySelector("#video");
+    let isStreaming = false;
+    let firstIter = true;   // When canvases are being rendered for the first time i.e. when stream is started
+    let array_worker_FAST = [];
+    let array_bufferCanvas = [];
+    let array_bufferCanvasCtx = [];
+    let array_dims = [];
+    // Global Variables
+    var imgSrc, myStream, videoStreamWidth = 0, videoStreamHeight = 0, newDims;
+    navigator.mediaDevices.enumerateDevices().then(devices => {
+      devices.forEach((device, i) => {
+        if(device.kind === "videoinput") {
+          let option = document.createElement("option");
+          option.innerHTML = device.label;
+          option.value = device.deviceId;
+          videoSourceSelect.appendChild(option);
+        }
+      })
+    });
+    const toggleStream = () => {
+      if(!isStreaming){
+        imageContainer.innerHTML = "";
+        streamToggleButton.innerText = "Stop Stream";
+        isStreaming = true;
+        let levels = [0, 4];
+        for(let i=levels[0]; i < levels[1]; i++) {
+          array_worker_FAST.push(new Worker("/js/FASTPixelFinder.js"));
+          let bufferCanvas = document.createElement("canvas");
+          bufferCanvas.setAttribute("class", "level" + i.toString())
+          imageContainer.appendChild(bufferCanvas);
+          bufferCanvas.onmousemove = (e) => {
+            let a = document.querySelector(".coord");
+            a.innerHTML = "";
+            a.innerText = e.layerX + " " + e.layerY;
+          }
+
+          array_bufferCanvas.push(bufferCanvas.transferControlToOffscreen());
+        }
+
+        let videoSource = videoSourceSelect.value;
+        navigator.mediaDevices.getUserMedia({
+          video: {
+            // width: { min: 640, ideal: 1280, max: 1920 },
+            // height: { min: 480, ideal: 720, max: 1080 },
+
+            width: { min: 640, ideal: 1280 },
+            height: { min: 480, ideal: 720 },
+            deviceId: { exact: videoSource }
+          },
+          audio: false
+        })
+        .then(function(stream) {
+          video.style.display = "none";
+          myStream = stream;
+          video.srcObject = stream;
+
+          videoStreamHeight = stream.getVideoTracks()[0].getSettings().height;
+          videoStreamWidth = stream.getVideoTracks()[0].getSettings().width;
+          newDims = resizeImage({width: videoStreamWidth, height: videoStreamHeight}, 0.6);
+          newDims.width = Math.round(newDims.width);
+          newDims.height = Math.round(newDims.height);
+          canvasImage.width = newDims.width;
+          canvasImage.height = newDims.height;
+
+          for(let i=levels[0]; i < levels[1]; i++) {
+            array_dims.push({width: newDims.width / Math.pow(2, i), height: newDims.height / Math.pow(2, i)});
+          }
+          video.play();
+        })
+        .catch(function(err) {
+            console.log("An error occurred! " + err);
+        });
+
+        video.addEventListener("playing", function(){
+          function renderFrame() {
+            if(!video.paused) {
+              let BRIEFPatterns = initializeBRIEFPatterns();
+              for(let j=0; j < array_dims.length; j++) {
+                // Reset Canvas
+                if(j !== 0) {
+                  canvasImageBufferCtx.save();
+                  canvasImageBufferCtx.setTransform(1, 0, 0, 1, 0, 0);
+                  canvasImageBufferCtx.clearRect(0, 0, array_dims[j-1].width, array_dims[j-1].height);
+                  canvasImageBufferCtx.restore();
+                }
+                // Draw video frames on canvasImageBuffer to get frame imageData
+                canvasImageBuffer.width = array_dims[j].width;
+                canvasImageBuffer.height = array_dims[j].height;
+                canvasImageBufferCtx.drawImage(video, 0, 0, array_dims[j].width, array_dims[j].height);
+
+                let threshold = 7;
+                let stride = parseInt(strideInput.value);
+                let blur = parseInt(blurInput.value);
+                let showFASTPoints = showFASTPointsInput.checked;
+                let showORBPoints = showORBPointsInput.checked;
+                let imageData = canvasImageBufferCtx.getImageData(0, 0, array_dims[j].width, array_dims[j].height);
+
+                if(firstIter) {
+
+                  array_worker_FAST[j].postMessage(
+                    {
+                      imageData: imageData,
+                      bufferCanvas: array_bufferCanvas[j],
+                      threshold: threshold,
+                      stride: stride,
+                      blur: blur,
+                      firstIter: firstIter,
+                      BRIEFPoints: BRIEFPatterns,
+                      level: j,
+                      showFASTPoints: showFASTPoints,
+                      showORBPoints: showORBPoints
+                    },
+                    [array_bufferCanvas[j]]
+                  );
+                }
+                else{
+                  array_worker_FAST[j].postMessage(
+                  {
+                    imageData: imageData,
+                    threshold: threshold,
+                    stride: stride,
+                    blur: blur,
+                    level: j,
+                    showFASTPoints: showFASTPoints,
+                    showORBPoints: showORBPoints
+                  });
+                }
+              }
+              firstIter = false;
+              requestAnimationFrame(renderFrame);
+            }
+          }
+          requestAnimationFrame(renderFrame);
+        });
+      }
+      else {
+        firstIter = true;
+        isStreaming = false;
+        streamToggleButton.innerText = "Start Stream";
+        video.pause();
+        myStream.getVideoTracks()[0].stop();
+        array_worker_FAST.forEach(worker => worker.terminate());
+        array_worker_FAST = [];
+        array_bufferCanvas = [];
+        array_bufferCanvasCtx = [];
+        array_dims = [];
+        firstIter = true;
+      }
+    };
+
+    let fastPixelLocationList = [[0, -3], [1, -3], [2, -2], [3, -1], [3, 0], [3, 1], [2, 2], [1, 3], [0, 3], [-1, 3], [-2, 2], [-3, 1], [-3, 0], [-3, -1], [-2, -2], [-1, -3]];
+
+    const kernel_FAST2 = gpu.createKernel(function(imageData, width, height, fastPixelLocationList){
+      if(this.thread.x / 4 / width >= 3 && this.thread.x / 4 % width >= 3) {
+        // Check only R channel since imageData is of a grayscale image
+        if(this.thread.x % 4 !== 3) {
+          let g_pixelColor = imageData[this.thread.x];
+          let count = 0;
+          let lastPixel = 0;
+          let threshold = 7;
+          for(let i=0; i < 16; i++) {
+            let FAST_g_pixelColor = imageData[this.thread.x + (fastPixelLocationList[i][1] * 4 * width) + 4 * fastPixelLocationList[i][0] * 4];
+            if(FAST_g_pixelColor > g_pixelColor + threshold) {
+              if(lastPixel !== 1) {
+                count -= count;
+              }
+              lastPixel = 1;
+              count++;
+            }
+            else if (FAST_g_pixelColor < g_pixelColor - threshold){
+              if(lastPixel !== 0) {
+                count -= count;
+              }
+              lastPixel = 0;
+              count++;
+            }
+
+            if(count === 12) {
+              return 255;
+            }
+          }
+          return imageData[this.thread.x];
+        }
+        return 255;
+      }
+      return imageData[this.thread.x];
+    })
+    .setDynamicOutput(true);
+    const kernel_rgb2Gray = gpu.createKernel(function(imageDataArray) {
+      if(this.thread.x % 4 !== 3)
+        return Math.round(imageDataArray[this.thread.x - this.thread.x % 4] * 0.3 + imageDataArray[this.thread.x + 1 - this.thread.x % 4] * 0.59 + imageDataArray[this.thread.x + 2 - this.thread.x % 4] * 0.11);
+      else
+        return imageDataArray[this.thread.x];
+    })
+    .setDynamicOutput(true);
+    const kernel_blurPass1 = gpu.createKernel(function(imageData, width) {
+      if( this.thread.x / 4 / width >= 0 &&
+          this.thread.x / 4 % width > 0 && this.thread.x / 4 % width < (width - 1) && this.thread.x % 4 !== 3) {
+        return 0.25 * (imageData[this.thread.x - 4] + imageData[this.thread.x] * 2 + imageData[this.thread.x + 4]);
+      }
+      return imageData[this.thread.x];
+    })
+    .setDynamicOutput(true);
+    const kernel_blurPass2 = gpu.createKernel(function(imageData, width, height) {
+      if( this.thread.x / 4 % width >= 0 &&
+          this.thread.x / 4 / width > 0 && this.thread.x / 4 / width < (height - 1) && this.thread.x % 4 !== 3) {
+        return 0.25 * (imageData[this.thread.x - 4 - (width * 4)] + imageData[this.thread.x] * 2 + imageData[this.thread.x + 4 + (width * 4)]);
+      }
+      return imageData[this.thread.x];
+    })
+    .setDynamicOutput(true);
+    const kernel_blur = gpu.combineKernels(kernel_blurPass1, kernel_blurPass2, function(imageData, width, height) {
+      kernel_blurPass1.setOutput([width * height * 4]);
+      kernel_blurPass2.setOutput([width * height * 4]);
+      return kernel_blurPass2(kernel_blurPass1(imageData, width), width, height);
+    });
+    const kernel_toGrayBlur = gpu.combineKernels(kernel_rgb2Gray, kernel_blurPass1, kernel_blurPass2, function(imageData, width, height) {
+      kernel_rgb2Gray.setOutput([width * height * 4]);
+      kernel_blurPass1.setOutput([width * height * 4]);
+      kernel_blurPass2.setOutput([width * height * 4]);
+      return kernel_blurPass2(kernel_blurPass1(kernel_rgb2Gray(imageData), width), width, height);
+    });
+
+    /**
+     * [Resizes image according to viewport]
+     * @param {Image} image Input image which is to be processed
+     * @param {Float} viewPortPercentage  Percentage of viewport to resize input image
+     */
+    const resizeImage = function (image, viewportPercentage = 0.80){
+      let aspectRatio = 1;
+      let imgWidth = image.width;
+      let imgHeight = image.height;
+
+      // Resize width to fit within window width boundary
+      if(Math.floor(window.innerWidth * viewportPercentage) < imgWidth) {
+        let newWidth = Math.floor(window.innerWidth * viewportPercentage);
+        aspectRatio = newWidth/imgWidth;
+        imgWidth = newWidth;
+        imgHeight = imgHeight * aspectRatio;
+      }
+
+      // Resize height to fit within window height boundary
+      if(Math.floor(window.innerHeight * viewportPercentage) < imgHeight) {
+        let newHeight = Math.floor(window.innerHeight * viewportPercentage);
+        aspectRatio = newHeight/imgHeight;
+        imgHeight = newHeight;
+        imgWidth = imgWidth * aspectRatio;
+      }
+      image.width = imgWidth;
+      image.height = imgHeight;
+      return image;
+    }
+
+    const repeatArrElements = function (arr) {
+      let arrNew = [];
+      arr.forEach((el) => {
+        let appendArr = new Float32Array(4);
+        appendArr.fill(el, 0, 3);
+        appendArr[appendArr.length-1] = 255;
+        arrNew.push(...appendArr);
+      });
+      return arrNew;
+    }
+
+
+  </script>
+</body>
+</html>
